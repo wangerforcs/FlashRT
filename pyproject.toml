@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flash-vla"
+version = "0.1.0"
+description = "FlashRT — realtime CUDA inference engine for small-batch, latency-sensitive AI workloads. Flagship integration: FlashVLA (Pi0, Pi0.5, GROOT N1.6, Pi0-FAST)."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+torch = ["torch", "safetensors", "sentencepiece"]
+jax = ["jax", "jaxlib", "ml_dtypes", "orbax-checkpoint", "flax"]
+server = ["fastapi", "uvicorn"]
+eval = ["opencv-python", "tqdm"]
+all = ["flash-vla[torch,jax,server,eval]"]
+
+[tool.setuptools.packages.find]
+include = ["flash_vla*"]
+
+[tool.setuptools.package-data]
+flash_vla = ["*.so", "*.yaml", "*.model"]
