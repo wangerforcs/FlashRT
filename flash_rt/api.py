@@ -334,6 +334,8 @@ def load_model(checkpoint, framework="torch", num_views=2, autotune=3,
     import inspect
     sig = inspect.signature(pipe_cls)
     kwargs: dict = {"num_views": num_views}
+    if "hardware" in sig.parameters:
+        kwargs["hardware"] = arch
     if "use_fp8" in sig.parameters:
         kwargs["use_fp8"] = use_fp8
     if config == "pi0fast":

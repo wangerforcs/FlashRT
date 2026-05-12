@@ -343,6 +343,31 @@ def _quantize_fp8_e4m3(w_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     return w_fp8, scale_tensor
 
 
+def _select_fp8_layout(hardware: Optional[str], fp8_layout: Optional[str]) -> str:
+    """Choose the Pi0.5 FP8 weight layout.
+
+    ``kn`` is the existing SM120 path: weights are stored as [K,N] and use
+    ``fp8_nn_dev``. ``nk`` is the SM89-compatible path: weights are stored
+    as [N,K] and use ``fp8_nt_dev``.
+    """
+    if fp8_layout is not None:
+        if fp8_layout not in ("kn", "nk"):
+            raise ValueError(f"fp8_layout must be 'kn' or 'nk', got {fp8_layout!r}")
+        return fp8_layout
+    if hardware == "rtx_sm89":
+        return "nk"
+    if hardware == "rtx_sm120":
+        return "kn"
+    try:
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            if major == 8 and minor == 9:
+                return "nk"
+    except Exception:
+        pass
+    return "kn"
+
+
 def _precompute_decoder_styles(ckpt: dict, chunk_size: int,
                                num_steps: int = NUM_STEPS_DEFAULT) -> dict:
     """Pre-compute the time-MLP + per-layer style modulations in torch.
@@ -423,12 +448,15 @@ class Pi05TorchFrontendRtx:
                  num_views: int = 2,
                  chunk_size: int = CHUNK_SIZE,
                  max_prompt_len: int = MAX_PROMPT_LEN_DEFAULT,
-                 use_fp8: bool = True):
+                 use_fp8: bool = True,
+                 hardware: Optional[str] = None,
+                 fp8_layout: Optional[str] = None):
         checkpoint_dir = pathlib.Path(checkpoint_dir)
         self.num_views = int(num_views)
         self.chunk_size = int(chunk_size)
         self.max_prompt_len = int(max_prompt_len)
         self.use_fp8 = bool(use_fp8)
+        self.fp8_layout = _select_fp8_layout(hardware, fp8_layout)
 
         self.latency_records: list[float] = []
         self.calibrated = False
@@ -504,8 +532,9 @@ class Pi05TorchFrontendRtx:
         from flash_rt.core.cuda_buffer import _cudart
         self._cudart = _cudart
 
-        logger.info("Pi05TorchFrontendRtx initialised (num_views=%d, chunk=%d)",
-                    self.num_views, self.chunk_size)
+        logger.info(
+            "Pi05TorchFrontendRtx initialised (num_views=%d, chunk=%d, fp8_layout=%s)",
+            self.num_views, self.chunk_size, self.fp8_layout)
 
     # -----------------------------------------------------------------
     # Checkpoint helpers
@@ -537,7 +566,11 @@ class Pi05TorchFrontendRtx:
         fp8 = self._fp8_weights
 
         def quant(name: str, w: torch.Tensor):
-            w_fp8, scale = _quantize_fp8_e4m3(w.contiguous())
+            if self.fp8_layout == "nk":
+                w = w.t().contiguous()
+            else:
+                w = w.contiguous()
+            w_fp8, scale = _quantize_fp8_e4m3(w)
             store.append(w_fp8)
             store.append(scale)
             fp8[name] = (w_fp8.data_ptr(), scale.data_ptr())
@@ -570,7 +603,7 @@ class Pi05TorchFrontendRtx:
             quant(f"decoder_ffn_gate_up_w_{i}", gate_up)
             quant(f"decoder_ffn_down_w_{i}", W["decoder_ffn_down_w"][i])
 
-        logger.info("FP8 quantized %d GEMM weights", len(fp8))
+        logger.info("FP8 quantized %d GEMM weights (layout=%s)", len(fp8), self.fp8_layout)
 
     def _build_pipeline_weights(self) -> dict:
         """Produce the pointer dict that Pi05Pipeline expects."""
@@ -627,6 +660,7 @@ class Pi05TorchFrontendRtx:
 
             # FP8 quantized weights
             "fp8": self._fp8_weights,
+            "fp8_layout": self.fp8_layout,
 
             # Precomputed decoder styles (numpy bf16 as uint16 view)
             "precomputed": self._precomputed_styles,
