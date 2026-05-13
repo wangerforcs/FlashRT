@@ -47,6 +47,36 @@ def test_load_model_propagates_use_fp8_when_frontend_accepts_it():
     assert UseFp8Frontend.seen_use_fp8 is False
 
 
+def test_load_model_propagates_hardware_when_frontend_accepts_it():
+    from flash_rt.api import load_model
+
+    class HardwareFrontend:
+        seen_hardware = None
+
+        def __init__(self, checkpoint, num_views=2, hardware=None):
+            type(self).seen_hardware = hardware
+
+        def infer(self, obs):
+            return {"actions": None}
+
+    with patch("flash_rt.hardware.resolve_pipeline_class",
+              return_value=HardwareFrontend):
+        model = load_model(
+            "/tmp/nonexistent", config="pi05", framework="torch",
+            hardware="rtx_sm89")
+
+    assert isinstance(model._pipe, HardwareFrontend)
+    assert HardwareFrontend.seen_hardware == "rtx_sm89"
+
+
+def test_pi05_rtx_fp8_layout_selection():
+    from flash_rt.frontends.torch.pi05_rtx import _select_fp8_layout
+
+    assert _select_fp8_layout("rtx_sm89", None) == "nk"
+    assert _select_fp8_layout("rtx_sm120", None) == "kn"
+    assert _select_fp8_layout("rtx_sm120", "nk") == "nk"
+
+
 def test_vla_frontend_constructors_accept_use_fp8():
     frontend_classes = {
         "flash_rt/frontends/torch/pi05_rtx.py": "Pi05TorchFrontendRtx",

@@ -161,6 +161,9 @@ class Pi05Pipeline:
         self.num_steps = int(num_steps)
         self.use_fp8 = bool(use_fp8)
         self.use_fp8_decoder = bool(use_fp8_decoder)
+        self.fp8_layout = weights.get("fp8_layout", "kn")
+        if self.fp8_layout not in ("kn", "nk"):
+            raise ValueError(f"unsupported FP8 layout: {self.fp8_layout!r}")
 
         # Derived sizes
         self.vision_seq = self.num_views * VIS_SEQ_PER_VIEW
@@ -369,6 +372,33 @@ class Pi05Pipeline:
         """Look up an FP8-quantized weight: returns (data_ptr, scale_ptr)."""
         return self.weights["fp8"][name]
 
+    def _fp8_matmul(self, act_fp8_ptr: int, weight_fp8_ptr: int,
+                    out_bf16_ptr: int, M: int, N: int, K: int,
+                    act_scale_ptr: int, weight_scale_ptr: int,
+                    stream: int) -> None:
+        """Dispatch the FP8 GEMM for the selected weight layout."""
+        if self.fp8_layout == "nk":
+            self.gemm.fp8_nt_dev(
+                act_fp8_ptr, weight_fp8_ptr, out_bf16_ptr,
+                M, N, K, act_scale_ptr, weight_scale_ptr, stream=stream)
+        else:
+            self.gemm.fp8_nn_dev(
+                act_fp8_ptr, weight_fp8_ptr, out_bf16_ptr,
+                M, N, K, act_scale_ptr, weight_scale_ptr, stream=stream)
+
+    def _autotune_fp8_matmul(self, act_fp8_ptr: int, weight_fp8_ptr: int,
+                             out_bf16_ptr: int, M: int, N: int, K: int,
+                             act_scale_ptr: int, weight_scale_ptr: int) -> None:
+        """Autotune the FP8 GEMM for the selected weight layout."""
+        if self.fp8_layout == "nk":
+            self.gemm.autotune_fp8_nt_dev(
+                act_fp8_ptr, weight_fp8_ptr, out_bf16_ptr,
+                M, N, K, act_scale_ptr, weight_scale_ptr)
+        else:
+            self.gemm.autotune_fp8_nn_dev(
+                act_fp8_ptr, weight_fp8_ptr, out_bf16_ptr,
+                M, N, K, act_scale_ptr, weight_scale_ptr)
+
     def _upload_precomputed_styles(self) -> None:
         """Upload frontend-precomputed decoder style/time buffers.
 
@@ -478,9 +508,9 @@ class Pi05Pipeline:
             static_scale_ptr = self.fp8_act_scales[weight_name].ptr.value
             fvk.quantize_fp8_static(
                 act_bf16_ptr, act_fp8_ptr, static_scale_ptr, act_n, stream=stream)
-            self.gemm.fp8_nn_dev(
+            self._fp8_matmul(
                 act_fp8_ptr, w_fp8_ptr, out_bf16_ptr,
-                M, N, K, static_scale_ptr, w_scale_ptr, stream=stream)
+                M, N, K, static_scale_ptr, w_scale_ptr, stream)
         else:
             # Dynamic quantization path (calibration run): write the
             # activation scale directly into the layer's *persistent* scale
@@ -489,18 +519,18 @@ class Pi05Pipeline:
             layer_scale = self._fp8_scale_buf(weight_name)
             fvk.quantize_fp8_device(
                 act_bf16_ptr, act_fp8_ptr, layer_scale.ptr.value, act_n, stream=stream)
-            self.gemm.fp8_nn_dev(
+            self._fp8_matmul(
                 act_fp8_ptr, w_fp8_ptr, out_bf16_ptr,
-                M, N, K, layer_scale.ptr.value, w_scale_ptr, stream=stream)
+                M, N, K, layer_scale.ptr.value, w_scale_ptr, stream)
 
     def _fp8_gemm_fused(self, act_fp8_ptr: int, weight_name: str,
                         out_bf16_ptr: int, M: int, N: int, K: int,
                         act_scale_ptr: int, stream: int) -> None:
         """FP8 GEMM with pre-quantized activation (from fused norm→FP8 kernel)."""
         w_fp8_ptr, w_scale_ptr = self._weight_fp8(weight_name)
-        self.gemm.fp8_nn_dev(
+        self._fp8_matmul(
             act_fp8_ptr, w_fp8_ptr, out_bf16_ptr,
-            M, N, K, act_scale_ptr, w_scale_ptr, stream=stream)
+            M, N, K, act_scale_ptr, w_scale_ptr, stream)
 
     def _bias_add_bf16(self, x_ptr: int, bias_ptr: int,
                        seq: int, dim: int, stream: int) -> None:
@@ -1186,7 +1216,7 @@ class Pi05Pipeline:
                     act_buf = B["vis_act_fp8_large"]
                 else:
                     act_buf = B["vis_act_fp8"]
-                gemm.autotune_fp8_nn_dev(
+                self._autotune_fp8_matmul(
                     act_buf.ptr.value, w_fp8_ptr, B[out_key].ptr.value,
                     M_val, N_val, K_val, act_scale_ptr, w_scale_ptr)
 
@@ -1201,7 +1231,7 @@ class Pi05Pipeline:
                 w_fp8_ptr, w_scale_ptr = self._weight_fp8(name_prefix)
                 act_scale_ptr = self.fp8_act_scales[name_prefix].ptr.value
                 act_buf = B["enc_act_fp8_large"] if K_val == ENC_H else B["enc_act_fp8"]
-                gemm.autotune_fp8_nn_dev(
+                self._autotune_fp8_matmul(
                     act_buf.ptr.value, w_fp8_ptr, B[out_key].ptr.value,
                     M_val, N_val, K_val, act_scale_ptr, w_scale_ptr)
 
@@ -1216,7 +1246,7 @@ class Pi05Pipeline:
                 w_fp8_ptr, w_scale_ptr = self._weight_fp8(name_prefix)
                 act_scale_ptr = self.fp8_act_scales[name_prefix].ptr.value
                 act_buf = B["dec_act_fp8_large"] if K_val == DEC_H else B["dec_act_fp8"]
-                gemm.autotune_fp8_nn_dev(
+                self._autotune_fp8_matmul(
                     act_buf.ptr.value, w_fp8_ptr, B[out_key].ptr.value,
                     M_val, N_val, K_val, act_scale_ptr, w_scale_ptr)
 

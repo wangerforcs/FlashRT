@@ -47,6 +47,7 @@ from flash_rt.frontends.torch.pi05_rtx import (
     MAX_PROMPT_LEN_DEFAULT,
     Pi05TorchFrontendRtx,
     _interleave_qk,
+    _select_fp8_layout,
 )
 
 logger = logging.getLogger(__name__)
@@ -441,6 +442,8 @@ class Pi05JaxFrontendRtx(Pi05TorchFrontendRtx):
         chunk_size: int = CHUNK_SIZE,
         max_prompt_len: int = MAX_PROMPT_LEN_DEFAULT,
         use_fp8: bool = True,
+        hardware: Optional[str] = None,
+        fp8_layout: Optional[str] = None,
     ):
         # Don't chain to Pi05TorchFrontendRtx.__init__ — it expects a safetensors
         # file. We replicate the body and swap the loader.
@@ -449,6 +452,7 @@ class Pi05JaxFrontendRtx(Pi05TorchFrontendRtx):
         self.chunk_size = int(chunk_size)
         self.max_prompt_len = int(max_prompt_len)
         self.use_fp8 = bool(use_fp8)
+        self.fp8_layout = _select_fp8_layout(hardware, fp8_layout)
 
         self.latency_records: list[float] = []
         self.calibrated = False
@@ -531,6 +535,6 @@ class Pi05JaxFrontendRtx(Pi05TorchFrontendRtx):
         self._cudart = _cudart
 
         logger.info(
-            "Pi05JaxFrontendRtx initialised (num_views=%d, chunk=%d)",
-            self.num_views, self.chunk_size,
+            "Pi05JaxFrontendRtx initialised (num_views=%d, chunk=%d, fp8_layout=%s)",
+            self.num_views, self.chunk_size, self.fp8_layout,
         )
